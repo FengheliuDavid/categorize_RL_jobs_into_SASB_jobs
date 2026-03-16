@@ -1,0 +1,79 @@
+#!/bin/bash
+#SBATCH --partition=gpunormal                  # all GPU nodes
+#SBATCH --nodes=6
+#SBATCH --ntasks-per-node=1                   # 1 bash task per node
+#SBATCH --gres=gpu:3                          # 3 GPUs per node → 18 total
+#SBATCH --time=24:00:00
+#SBATCH --mem=150G
+#SBATCH --job-name=rl_sasb_classification
+#SBATCH --output=Outputs/sasb_%j_%N.out
+#SBATCH --error=Outputs/sasb_%j_%N.err
+#SBATCH --exclude=c001
+
+WORKDIR=/gpfs/home/fl488/process_RL_sasb
+INPUT_CSV=$WORKDIR/role_combinations.csv
+OUTPUT_CSV=$WORKDIR/gemma_role_classification_output.csv
+
+mkdir -p $WORKDIR/Outputs
+cd $WORKDIR
+
+export PATH=/gpfs/project/populism/ollama/bin:$PATH
+
+module load python/3.11.11-wepq
+source /gpfs/project/populism/venv/bin/activate
+
+cleanup(){
+  echo "Cleaning up on $(hostname)..."
+  kill $P0 $P1 $P2 $MON_PID &>/dev/null || true
+}
+trap cleanup EXIT SIGINT SIGTERM
+
+srun \
+  --output=$WORKDIR/Outputs/sasb_srun_%j_%N.out \
+  --error=$WORKDIR/Outputs/sasb_srun_%j_%N.err \
+  bash -lc '
+
+  export PATH=/gpfs/project/populism/ollama/bin:$PATH
+  WORKDIR=/gpfs/home/fl488/process_RL_sasb
+
+  #-- Stagger startup to avoid thundering herd on GPFS model load --#
+  sleep $((SLURM_PROCID * 30))
+
+  #-- GPU monitoring --#
+  (
+    while true; do
+      echo "----- $(date) GPU USAGE on $(hostname) -----"
+      nvidia-smi
+      sleep 120
+    done
+  ) > $WORKDIR/Outputs/gpu_usage_$(hostname).log 2>&1 & MON_PID=$!
+
+  #-- Ollama servers on GPUs 0,1,2 --#
+  CUDA_VISIBLE_DEVICES=0 OLLAMA_HOST=127.0.0.1:11434 \
+    ollama start > $WORKDIR/Outputs/ollama_service_gpu0_$(hostname).log 2>&1 & P0=$!
+  CUDA_VISIBLE_DEVICES=1 OLLAMA_HOST=127.0.0.1:11435 \
+    ollama start > $WORKDIR/Outputs/ollama_service_gpu1_$(hostname).log 2>&1 & P1=$!
+  CUDA_VISIBLE_DEVICES=2 OLLAMA_HOST=127.0.0.1:11436 \
+    ollama start > $WORKDIR/Outputs/ollama_service_gpu2_$(hostname).log 2>&1 & P2=$!
+
+  #-- Wait for all 3 to be up --#
+  for port in 11434 11435 11436; do
+    until curl -s http://127.0.0.1:$port/ | grep -q "Ollama is running"; do
+      sleep 1
+    done
+  done
+
+  #-- Pull model on this node --#
+  echo "Pulling gemma3:27b on $(hostname)..."
+  ollama pull gemma3:27b
+  echo "Model ready on $(hostname)."
+
+  echo "Running inference on $(hostname) (shard $SLURM_PROCID of $SLURM_NTASKS)..."
+
+  /gpfs/project/populism/venv/bin/python $WORKDIR/gemma_role_classification.py \
+    --input-csv /gpfs/home/fl488/process_RL_sasb/role_combinations.csv \
+    --output-csv /gpfs/home/fl488/process_RL_sasb/gemma_role_classification_output.csv \
+    --shard-id=$SLURM_PROCID \
+    --num-shards=$SLURM_NTASKS \
+    --max-concurrent=20
+'
