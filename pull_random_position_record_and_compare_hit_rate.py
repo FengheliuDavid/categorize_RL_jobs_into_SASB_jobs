@@ -1,247 +1,148 @@
 """
-Pull 10,000 randomly sampled positions from temp_processed_global_position
-(startdate 2007–2025), merge with dictionary-based SASB classification from
-step1 output CSVs, and compare with Claude and GPT-4o classifications.
+Compare hit rates for three SASB classification approaches on a 10k random job sample.
 
-Output: comparison_sasb.csv with columns:
-    position_id, startdate, enddate, rcid, title_raw, description,
-    role_k1500_v3, role_k5000_v3, role_k10000_v3,
-    dict_sasb_categories,    ← from position_table_simple / _regex CSVs
-    claude_sasb_categories,  ← from output_sasb_claude.csv
-    claude_confidence,
-    gpt_sasb_categories,     ← from output_sasb_gpt.csv
-    gpt_confidence
+  gemma_role : step1 — role-title LLM (gemma_role_classification_output.csv)
+  gemma_desc : step2 — description-based LLM (gemma_combined_classification_output_100k.csv)
+  two_step   : step3 — combined role+desc mapping (role_to_sasb_mapping.csv)
+
+Uses cached merged.csv (sample + dict classification). Does NOT require ClickHouse.
 """
 
 import ast
-import clickhouse_connect
 import pandas as pd
 from pathlib import Path
-from pandas.errors import EmptyDataError
 
-# ── Config ───────────────────────────────────────────────────────────────────
-N_SAMPLE    = 10_000
-BASE        = Path("D:/fenghe/dropbox/Dropbox/fengheliu/temp/sasb_jobs")
-SIMPLE_DIR  = BASE / "position_table_simple"
-REGEX_DIR   = BASE / "position_table_regex"
-OUT_GEMMA   = BASE / "output_sasb.csv"
-OUT_CLAUDE  = BASE / "output_sasb_claude.csv"
-OUT_GPT     = BASE / "output_sasb_gpt.csv"
-OUT_PATH    = BASE / "comparison_sasb.csv"
+# ── Config ────────────────────────────────────────────────────────────────────
+BASE      = Path("D:/Dropbox/fengheliu/temp/sasb_jobs")
+TEMP_DATA = BASE / "temp_data"
+COMP_DIR  = BASE / "COMPARISON"
+COMP_DIR.mkdir(exist_ok=True)
 
-# ── ClickHouse ────────────────────────────────────────────────────────────────
-def connect():
-    client = clickhouse_connect.get_client(
-        host="192.168.204.128", port=8123,
-        username="default", password="YOUR_PASSWORD_HERE",
-        connect_timeout=600, send_receive_timeout=600,
-    )
-    client.command("USE revelio071625")
-    return client
+MERGED_CACHE = TEMP_DATA / "merged.csv"
+STEP1_CSV    = TEMP_DATA / "step1_gemma_role_classification" / "gemma_role_classification_output.csv"
+STEP2_CSV    = TEMP_DATA / "step2_gemma_combined_classification" / "gemma_combined_classification_output_100k.csv"
+STEP2_SAMPLE = TEMP_DATA / "step2_gemma_combined_classification" / "role_stratified_sample.csv"
+STEP3_CSV    = TEMP_DATA / "step3_assign_unmatched_roles" / "role_to_sasb_mapping.csv"
+OUT_PATH     = COMP_DIR / "comparison_sasb_v3.csv"
+SUMMARY_PATH = COMP_DIR / "summary_hit_rate_v3.csv"
 
-MERGED_CACHE = BASE / "temp_data" / "merged.csv"
+ROLE_COL = "role_k10000_v3"
 
-# ── 1-3. Load cached merged.csv or rebuild from DB + step1 CSVs ──────────────
-if MERGED_CACHE.exists():
-    print(f"Loading cached merged.csv ...")
-    merged = pd.read_csv(MERGED_CACHE)
-    merged["dict_sasb_categories"] = merged["dict_sasb_categories"].apply(
-        lambda x: x if isinstance(x, list) else (ast.literal_eval(x) if isinstance(x, str) else [])
-    )
-    n_dict = (merged["dict_sasb_categories"].apply(len) > 0).sum()
-    print(f"  Loaded {len(merged):,} rows; dict-classified: {n_dict:,}")
-else:
-    # ── 1. Pull random sample from DB ────────────────────────────────────────
-    print("Pulling random sample from DB ...")
-    client = connect()
-    sample_df = client.query_df(f"""
-        SELECT
-            position_id,
-            startdate,
-            enddate,
-            rcid,
-            title_raw,
-            role_k1500_v3,
-            role_k5000_v3,
-            role_k10000_v3,
-            description
-        FROM temp_processed_global_position
-        WHERE toYear(parseDateTimeBestEffortOrNull(startdate)) BETWEEN 2007 AND 2025
-        ORDER BY rand()
-        LIMIT {N_SAMPLE}
-    """)
-    print(f"  Sampled {len(sample_df):,} positions")
+def parse_list(val):
+    if isinstance(val, list): return val
+    if isinstance(val, str) and val.strip():
+        try: return ast.literal_eval(val)
+        except: return []
+    return []
 
-    # ── 2. Load step1 classification CSVs ────────────────────────────────────
-    print("Loading step1 classified CSVs ...")
-    parts = []
+# ── 1. Load cached sample ─────────────────────────────────────────────────────
+print("Loading cached merged.csv ...")
+merged = pd.read_csv(MERGED_CACHE)
+merged["dict_sasb_categories"] = merged["dict_sasb_categories"].apply(parse_list)
+n_dict = (merged["dict_sasb_categories"].apply(len) > 0).sum()
+print(f"  {len(merged):,} rows; dict-classified: {n_dict:,} ({n_dict/len(merged)*100:.2f}%)")
 
-    for f_simple in sorted(SIMPLE_DIR.glob("rl_sasb_raw_*.csv")):
-        stem     = f_simple.stem
-        category = stem[len("rl_sasb_raw_"):-5]
-        f_regex  = REGEX_DIR / f_simple.name
+# ── 2. gemma_role (step1): aggregate by role_k10000_v3 ───────────────────────
+print("\nLoading step1 (gemma_role) ...")
+role_df = pd.read_csv(STEP1_CSV)
+role_df["sasb_categories"] = role_df["sasb_categories"].apply(parse_list)
+role_df = role_df[role_df[ROLE_COL].notna()]
 
-        for fpath in (f_simple, f_regex):
-            if not fpath.exists() or fpath.stat().st_size == 0:
-                continue
-            try:
-                df = pd.read_csv(fpath, usecols=["position_id"])
-                df["category"] = category
-                parts.append(df)
-            except EmptyDataError:
-                pass
-
-    all_classified = pd.concat(parts, ignore_index=True)
-    print(f"  Total classified rows across all files: {len(all_classified):,}")
-
-    dict_df = (
-        all_classified
-        .groupby("position_id", sort=False)["category"]
-        .agg(lambda x: sorted(x.dropna().unique().tolist()))
-        .reset_index()
-        .rename(columns={"category": "dict_sasb_categories"})
-    )
-    print(f"  Unique classified positions: {len(dict_df):,}")
-    dict_df.to_csv(BASE / "temp_data" / "dict_df.csv")
-
-    # ── 3. Merge dict classification onto sample ──────────────────────────────
-    print("Merging dict classification onto sample ...")
-    merged = sample_df.merge(dict_df, on="position_id", how="left")
-    merged["dict_sasb_categories"] = merged["dict_sasb_categories"].apply(
-        lambda x: x if isinstance(x, list) else []
-    )
-    n_dict = (merged["dict_sasb_categories"].apply(len) > 0).sum()
-    print(f"  Positions with dict classification: {n_dict:,} / {len(merged):,}")
-    merged.to_csv(MERGED_CACHE)
-
-# ── Helper: load an LLM output CSV and aggregate by role_k10000_v3 ───────────
-def parse_list_col(s):
-    if isinstance(s, list):
-        return s
-    try:
-        return ast.literal_eval(s)
-    except Exception:
-        return []
-
-JOIN_COL = "role_k10000_v3"
-
-def load_llm_csv(path, cat_col, conf_col):
-    df = pd.read_csv(path)
-    df["sasb_categories"] = df["sasb_categories"].apply(parse_list_col)
-    df = df.rename(columns={"sasb_categories": cat_col, "confidence": conf_col})
-    agg = (
-        df.groupby(JOIN_COL, dropna=False)
-        .agg(
-            **{cat_col: (cat_col, lambda x: sorted({
-                cat
-                for item in x
-                for cat in (ast.literal_eval(item) if isinstance(item, str) else item)
-                if isinstance(cat, str) and cat
-            }))},
-            **{conf_col: (conf_col, "first")},
-        )
-        .reset_index()
-    )
-    return agg
-
-# ── 4a. Merge Gemma classification ───────────────────────────────────────────
-print("Loading and merging Gemma classification ...")
-gemma_agg = load_llm_csv(OUT_GEMMA, "gemma_sasb_categories", "gemma_confidence")
-merged = merged.merge(gemma_agg, on=JOIN_COL, how="left")
-merged["gemma_sasb_categories"] = merged["gemma_sasb_categories"].apply(
+role_map = (
+    role_df.groupby(ROLE_COL)["sasb_categories"]
+    .agg(lambda x: sorted({cat for cats in x for cat in cats}))
+    .reset_index()
+    .rename(columns={"sasb_categories": "gemma_role_categories"})
+)
+merged = merged.merge(role_map, on=ROLE_COL, how="left")
+merged["gemma_role_categories"] = merged["gemma_role_categories"].apply(
     lambda x: x if isinstance(x, list) else []
 )
-n_gemma = (merged["gemma_sasb_categories"].apply(len) > 0).sum()
-print(f"  Positions with Gemma classification:  {n_gemma:,} / {len(merged):,}")
+n_role = (merged["gemma_role_categories"].apply(len) > 0).sum()
+print(f"  Positions with gemma_role: {n_role:,} / {len(merged):,} ({n_role/len(merged)*100:.2f}%)")
 
-# ── 4c. Merge Claude classification ──────────────────────────────────────────
-print("Loading and merging Claude classification ...")
-claude_agg = load_llm_csv(OUT_CLAUDE, "claude_sasb_categories", "claude_confidence")
-merged = merged.merge(claude_agg, on=JOIN_COL, how="left")
-merged["claude_sasb_categories"] = merged["claude_sasb_categories"].apply(
+# ── 3. gemma_desc (step2): join sample→role, aggregate by role_k10000_v3 ─────
+print("\nLoading step2 (gemma_desc) ...")
+step2_sample = pd.read_csv(STEP2_SAMPLE, usecols=["position_id", ROLE_COL])
+step2_llm    = pd.read_csv(STEP2_CSV, usecols=["position_id", "sasb_categories"])
+step2_llm["sasb_categories"] = step2_llm["sasb_categories"].apply(parse_list)
+
+step2_joined = step2_sample.merge(step2_llm, on="position_id", how="inner")
+desc_map = (
+    step2_joined.groupby(ROLE_COL)["sasb_categories"]
+    .agg(lambda x: sorted({cat for cats in x for cat in cats}))
+    .reset_index()
+    .rename(columns={"sasb_categories": "gemma_desc_categories"})
+)
+merged = merged.merge(desc_map, on=ROLE_COL, how="left")
+merged["gemma_desc_categories"] = merged["gemma_desc_categories"].apply(
     lambda x: x if isinstance(x, list) else []
 )
-n_claude = (merged["claude_sasb_categories"].apply(len) > 0).sum()
-print(f"  Positions with Claude classification: {n_claude:,} / {len(merged):,}")
+n_desc = (merged["gemma_desc_categories"].apply(len) > 0).sum()
+print(f"  Positions with gemma_desc: {n_desc:,} / {len(merged):,} ({n_desc/len(merged)*100:.2f}%)")
 
-# ── 4d. Merge GPT classification ──────────────────────────────────────────────
-print("Loading and merging GPT-4o classification ...")
-gpt_agg = load_llm_csv(OUT_GPT, "gpt_sasb_categories", "gpt_confidence")
-merged = merged.merge(gpt_agg, on=JOIN_COL, how="left")
-merged["gpt_sasb_categories"] = merged["gpt_sasb_categories"].apply(
+# ── 4. two_step (step3): role_to_sasb_mapping, join by role_k10000_v3 ─────────
+print("\nLoading step3 (two_step) ...")
+step3 = pd.read_csv(STEP3_CSV, usecols=[ROLE_COL, "sasb_categories"])
+step3["sasb_categories"] = step3["sasb_categories"].apply(parse_list)
+step3 = step3.rename(columns={"sasb_categories": "two_step_categories"})
+
+merged = merged.merge(step3, on=ROLE_COL, how="left")
+merged["two_step_categories"] = merged["two_step_categories"].apply(
     lambda x: x if isinstance(x, list) else []
 )
-n_gpt = (merged["gpt_sasb_categories"].apply(len) > 0).sum()
-print(f"  Positions with GPT-4o classification: {n_gpt:,} / {len(merged):,}")
+n_two = (merged["two_step_categories"].apply(len) > 0).sum()
+print(f"  Positions with two_step:   {n_two:,} / {len(merged):,} ({n_two/len(merged)*100:.2f}%)")
 
-# ── 5. Save ───────────────────────────────────────────────────────────────────
+# ── 5. Save comparison CSV ────────────────────────────────────────────────────
 col_order = [
     "position_id", "startdate", "enddate", "rcid", "title_raw", "description",
-    "role_k1500_v3", "role_k5000_v3", "role_k10000_v3",
+    "role_k1500_v3", "role_k5000_v3", ROLE_COL,
     "dict_sasb_categories",
-    "gemma_sasb_categories",
-    "claude_sasb_categories",
-    "gpt_sasb_categories",
+    "gemma_role_categories",
+    "gemma_desc_categories",
+    "two_step_categories",
 ]
+col_order = [c for c in col_order if c in merged.columns]
 merged[col_order].to_csv(OUT_PATH, index=False)
-print(f"\nSaved {len(merged):,} rows to:\n  {OUT_PATH}")
+print(f"\nSaved {len(merged):,} rows to: {OUT_PATH}")
 
-# ── 6. Summary table ─────────────────────────────────────────────────────────
+# ── 6. Summary table ──────────────────────────────────────────────────────────
 print("\nGenerating summary table ...")
 
-df = pd.read_csv(OUT_PATH)
-SUMMARY_COLS = ("dict_sasb_categories", "gemma_sasb_categories",
-                "gemma_desc_sasb_categories", "gemma_combined_sasb_categories")
+SUMMARY_COLS = [
+    ("dict_sasb_categories",  "dict"),
+    ("gemma_role_categories", "gemma_role"),
+    ("gemma_desc_categories", "gemma_desc"),
+    ("two_step_categories",   "two_step"),
+]
 
-for col in SUMMARY_COLS:
-    if col in df.columns:
-        df[col] = df[col].apply(parse_list_col)
-    else:
-        df[col] = [[]] * len(df)
-
-all_categories = sorted({
+all_cats = sorted({
     cat
-    for col in SUMMARY_COLS
-    for cats in df[col]
+    for col, _ in SUMMARY_COLS
+    for cats in merged[col]
     for cat in cats
 })
 
 rows = []
-for cat in all_categories:
-    dict_hit     = df["dict_sasb_categories"].apply(lambda x: cat in x)
-    role_hit     = df["gemma_sasb_categories"].apply(lambda x: cat in x)
-    desc_hit     = df["gemma_desc_sasb_categories"].apply(lambda x: cat in x)
-    combined_hit = df["gemma_combined_sasb_categories"].apply(lambda x: cat in x)
-    rows.append({
-        "sasb_category":        cat,
-        "dict_n":               dict_hit.sum(),
-        "dict_rate_%":          round(dict_hit.mean() * 100, 3),
-        "gemma_role_n":         role_hit.sum(),
-        "gemma_role_rate_%":    round(role_hit.mean() * 100, 3),
-        "gemma_desc_n":         desc_hit.sum(),
-        "gemma_desc_rate_%":    round(desc_hit.mean() * 100, 3),
-        "gemma_combined_n":     combined_hit.sum(),
-        "gemma_combined_rate_%": round(combined_hit.mean() * 100, 3),
-    })
+total = len(merged)
+for cat in all_cats:
+    row = {"sasb_category": cat}
+    for col, prefix in SUMMARY_COLS:
+        hit = merged[col].apply(lambda x, c=cat: c in x)
+        row[f"{prefix}_n"]      = int(hit.sum())
+        row[f"{prefix}_rate_%"] = round(hit.mean() * 100, 3)
+    rows.append(row)
 
-dict_any     = df["dict_sasb_categories"].apply(lambda x: len(x) > 0)
-role_any     = df["gemma_sasb_categories"].apply(lambda x: len(x) > 0)
-desc_any     = df["gemma_desc_sasb_categories"].apply(lambda x: len(x) > 0)
-combined_any = df["gemma_combined_sasb_categories"].apply(lambda x: len(x) > 0)
-rows.append({
-    "sasb_category":         "TOTAL (any category)",
-    "dict_n":                dict_any.sum(),
-    "dict_rate_%":           round(dict_any.mean() * 100, 3),
-    "gemma_role_n":          role_any.sum(),
-    "gemma_role_rate_%":     round(role_any.mean() * 100, 3),
-    "gemma_desc_n":          desc_any.sum(),
-    "gemma_desc_rate_%":     round(desc_any.mean() * 100, 3),
-    "gemma_combined_n":      combined_any.sum(),
-    "gemma_combined_rate_%": round(combined_any.mean() * 100, 3),
-})
+# TOTAL row
+row = {"sasb_category": "TOTAL (any category)"}
+for col, prefix in SUMMARY_COLS:
+    hit = merged[col].apply(lambda x: len(x) > 0)
+    row[f"{prefix}_n"]      = int(hit.sum())
+    row[f"{prefix}_rate_%"] = round(hit.mean() * 100, 3)
+rows.append(row)
 
 summary = pd.DataFrame(rows)
-SUMMARY_PATH = BASE / "summary_hit_rate.csv"
 summary.to_csv(SUMMARY_PATH, index=False)
 print(summary.to_string(index=False))
-print(f"\nSaved summary to:\n  {SUMMARY_PATH}")
+print(f"\nSaved summary to: {SUMMARY_PATH}")
