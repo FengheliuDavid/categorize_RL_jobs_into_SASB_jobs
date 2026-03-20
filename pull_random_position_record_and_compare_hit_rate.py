@@ -22,9 +22,12 @@ MERGED_CACHE = TEMP_DATA / "merged.csv"
 STEP1_CSV    = TEMP_DATA / "step1_gemma_role_classification" / "gemma_role_classification_output.csv"
 STEP2_CSV    = TEMP_DATA / "step2_gemma_combined_classification" / "gemma_combined_classification_output_100k.csv"
 STEP2_SAMPLE = TEMP_DATA / "step2_gemma_combined_classification" / "role_stratified_sample.csv"
-STEP3_CSV    = TEMP_DATA / "step3_assign_unmatched_roles" / "role_to_sasb_mapping.csv"
-OUT_PATH     = COMP_DIR / "comparison_sasb_v3.csv"
-SUMMARY_PATH = COMP_DIR / "summary_hit_rate_v3.csv"
+STEP3_CSV    = TEMP_DATA / "step3_assign_unmatched_roles" / "role_to_sasb_mapping_0.5_threshold.csv"
+
+# Derive output suffix from input filename: "role_to_sasb_mapping_0.5_threshold" -> "0.5_threshold"
+_step3_suffix = STEP3_CSV.stem.replace("role_to_sasb_mapping_", "")
+OUT_PATH     = COMP_DIR / f"comparison_sasb_{_step3_suffix}.csv"
+SUMMARY_PATH = COMP_DIR / f"summary_hit_rate_{_step3_suffix}.csv"
 
 ROLE_COL = "role_k10000_v3"
 
@@ -113,7 +116,6 @@ print("\nGenerating summary table ...")
 SUMMARY_COLS = [
     ("dict_sasb_categories",  "dict"),
     ("gemma_role_categories", "gemma_role"),
-    ("gemma_desc_categories", "gemma_desc"),
     ("two_step_categories",   "two_step"),
 ]
 
