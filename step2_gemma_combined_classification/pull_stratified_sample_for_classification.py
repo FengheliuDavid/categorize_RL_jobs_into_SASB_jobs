@@ -14,8 +14,8 @@ import pandas as pd
 from pathlib import Path
 
 BASE        = Path("D:/fenghe/dropbox/Dropbox/fengheliu/temp/sasb_jobs")
-OUT_PATH    = BASE / "temp_data" / "role_stratified_sample.csv"
-JOBS_PER_ROLE = 10
+OUT_PATH    = BASE / "temp_data" / "step2_gemma_combined_classification" / "role_stratified_sample.csv"
+JOBS_PER_ROLE = 1000
 ROLE_COL      = "role_k10000_v3"
 
 def connect():
@@ -48,7 +48,7 @@ print(f"  Sampled {len(ids_df):,} position_ids across {ids_df['role_k10000_v3'].
 
 print(f"Step 2: fetching descriptions for sampled IDs (in batches) ...")
 all_ids   = ids_df["position_id"].tolist()
-BATCH     = 5_000
+BATCH     = 10_000
 desc_parts = []
 for i in range(0, len(all_ids), BATCH):
     chunk   = all_ids[i : i + BATCH]
