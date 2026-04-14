@@ -13,7 +13,7 @@ import pandas as pd
 from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BASE      = Path("D:/fenghe/dropbox/Dropbox/fengheliu/temp/sasb_jobs")
+BASE      = Path("D:/Dropbox/fengheliu/temp/sasb_jobs")
 TEMP_DATA = BASE / "temp_data"
 COMP_DIR  = BASE / "COMPARISON"
 COMP_DIR.mkdir(exist_ok=True)
@@ -23,10 +23,10 @@ STEP1_CSV    = TEMP_DATA / "step1_gemma_role_classification" / "gemma_role_class
 STEP2_CSV    = TEMP_DATA / "step2_gemma_combined_classification" / "gemma_combined_classification_output_100k_llama_cpp.csv"
 STEP2_SAMPLE = TEMP_DATA / "step2_gemma_combined_classification" / "role_stratified_sample.csv"
 STEP3_CSV        = TEMP_DATA / "step3_assign_unmatched_roles" / "role_to_sasb_mapping_0.5_threshold.csv"
-STEP3_LLAMA_CSV  = TEMP_DATA / "step3_assign_unmatched_roles" / "role_to_sasb_mapping_llama_cpp_0.3_threshold.csv"
+STEP3_10M_CSV    = TEMP_DATA / "step3_assign_unmatched_roles" / "role_to_sasb_mapping_10m_0.5.csv"
 
-OUT_PATH     = COMP_DIR / "comparison_sasb_with_llama_cpp.csv"
-SUMMARY_PATH = COMP_DIR / "summary_hit_rate_with_llama_cpp.csv"
+OUT_PATH     = COMP_DIR / "comparison_sasb_2026_04_09_0.5.csv"
+SUMMARY_PATH = COMP_DIR / "summary_hit_rate_2026_04_09_0.5.csv"
 
 ROLE_COL = "role_k10000_v3"
 
@@ -97,17 +97,17 @@ n_two = (merged["two_step_categories"].apply(len) > 0).sum()
 print(f"  Positions with two_step:   {n_two:,} / {len(merged):,} ({n_two/len(merged)*100:.2f}%)")
 
 # ── 4b. two_step_llama (step3 llama_cpp): join by role_k10000_v3 ──────────────
-print("\nLoading step3 llama_cpp (two_step_llama) ...")
-step3_llama = pd.read_csv(STEP3_LLAMA_CSV, usecols=[ROLE_COL, "sasb_categories"])
-step3_llama["sasb_categories"] = step3_llama["sasb_categories"].apply(parse_list)
-step3_llama = step3_llama.rename(columns={"sasb_categories": "two_step_llama_categories"})
+print("\nLoading step3 10m (two_step_10m) ...")
+step3_10m = pd.read_csv(STEP3_10M_CSV, usecols=[ROLE_COL, "sasb_categories"])
+step3_10m["sasb_categories"] = step3_10m["sasb_categories"].apply(parse_list)
+step3_10m = step3_10m.rename(columns={"sasb_categories": "two_step_10m_categories"})
 
-merged = merged.merge(step3_llama, on=ROLE_COL, how="left")
-merged["two_step_llama_categories"] = merged["two_step_llama_categories"].apply(
+merged = merged.merge(step3_10m, on=ROLE_COL, how="left")
+merged["two_step_10m_categories"] = merged["two_step_10m_categories"].apply(
     lambda x: x if isinstance(x, list) else []
 )
-n_llama = (merged["two_step_llama_categories"].apply(len) > 0).sum()
-print(f"  Positions with two_step_llama: {n_llama:,} / {len(merged):,} ({n_llama/len(merged)*100:.2f}%)")
+n_10m = (merged["two_step_10m_categories"].apply(len) > 0).sum()
+print(f"  Positions with two_step_10m: {n_10m:,} / {len(merged):,} ({n_10m/len(merged)*100:.2f}%)")
 
 # ── 5. Save comparison CSV ────────────────────────────────────────────────────
 col_order = [
@@ -117,7 +117,7 @@ col_order = [
     "gemma_role_categories",
     "gemma_desc_categories",
     "two_step_categories",
-    "two_step_llama_categories",
+    "two_step_10m_categories",
 ]
 col_order = [c for c in col_order if c in merged.columns]
 merged[col_order].to_csv(OUT_PATH, index=False)
@@ -130,7 +130,7 @@ SUMMARY_COLS = [
     ("dict_sasb_categories",       "dict"),
     ("gemma_role_categories",      "gemma_role"),
     ("two_step_categories",        "two_step_ollama"),
-    ("two_step_llama_categories",  "two_step_llama"),
+    ("two_step_10m_categories",    "two_step_10m"),
 ]
 
 all_cats = sorted({
