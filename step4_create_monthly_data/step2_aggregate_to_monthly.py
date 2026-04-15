@@ -8,7 +8,7 @@ Inputs:
   - cleaned_data/keyword_dictionary_approach/all_new_jobs_monthly.csv
 
 Outputs (in cleaned_data/role_based_approach/):
-  - revelio_sasb_monthly_new_jobs_role_based.parquet   (rcid × month × 25 SASB counts)
+  - revelio_sasb_monthly_new_jobs_role_based.parquet   (rcid × month × 26 SASB counts)
   - revelio_sasb_monthly_share_new_jobs_role_based.parquet  (pct_ columns)
 """
 
@@ -82,6 +82,7 @@ positions["start_month"] = positions["startdate"].dt.to_period("M").astype(str)
 
 # ── 5. Explode sasb_categories → one row per position × category ──────────────
 print("Exploding SASB categories ...")
+positions["sasb_categories"] = positions["sasb_categories"].apply(parse_list)
 positions = positions.explode("sasb_categories").rename(columns={"sasb_categories": "category"})
 positions = positions.dropna(subset=["category"])
 print(f"  {len(positions):,} position-category rows")
@@ -109,17 +110,23 @@ wide = (
 )
 wide.columns.name = None
 
-# Ensure all 25 SASB columns exist
+# Ensure all 26 SASB columns exist
 for col in SASB_COLS:
     if col not in wide.columns:
+        print(col)
         wide[col] = 0
 
 # ── 8. Balance panel: all rcid × all months 2007-01 to 2025-12 ───────────────
 print("Building balanced panel ...")
+all_jobs = pd.read_csv(ALL_JOBS)
+if "month" in all_jobs.columns and "start_month" not in all_jobs.columns:
+    all_jobs = all_jobs.rename(columns={"month": "start_month"})
+
 all_months = pd.DataFrame({
     "start_month": pd.period_range("2007-01", "2025-12", freq="M").astype(str)
 })
-rcids = pd.DataFrame({"rcid": wide["rcid"].unique()})
+df_link = pd.read_csv(UNIVERSE).drop_duplicates(subset=["rcid"])
+rcids = pd.DataFrame({"rcid": all_jobs["rcid"].unique()})
 panel = rcids.merge(all_months, how="cross")
 
 wide_balanced = panel.merge(wide, on=["rcid", "start_month"], how="left")
@@ -128,8 +135,9 @@ print(f"  Balanced panel: {len(wide_balanced):,} rows, {wide_balanced['rcid'].nu
 
 # ── 9. Merge company identifiers ──────────────────────────────────────────────
 print("Merging company identifiers ...")
-df_link = pd.read_csv(UNIVERSE).drop_duplicates(subset=["rcid"])
 wide_balanced = wide_balanced.merge(df_link, on="rcid", how="left")
+wide_balanced["gvkey"].isna().sum()
+len(wide_balanced)
 
 # ── 10. Save monthly counts ───────────────────────────────────────────────────
 out_counts = OUT_DIR / "revelio_sasb_monthly_new_jobs_role_based.parquet"
@@ -138,10 +146,6 @@ print(f"Saved counts → {out_counts}")
 
 # ── 11. Compute shares ────────────────────────────────────────────────────────
 print("Computing SASB shares ...")
-all_jobs = pd.read_csv(ALL_JOBS)
-# normalise column name (old scripts renamed it)
-if "month" in all_jobs.columns and "start_month" not in all_jobs.columns:
-    all_jobs = all_jobs.rename(columns={"month": "start_month"})
 
 df_share = wide_balanced.merge(all_jobs[["rcid", "start_month", "all_new_jobs_weighted"]],
                                 on=["rcid", "start_month"], how="left")
