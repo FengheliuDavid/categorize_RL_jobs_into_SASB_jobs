@@ -26,7 +26,7 @@ ROLE_MAPPING    = TEMP_DATA / "step3_assign_unmatched_roles" / f"role_to_sasb_ma
 POSITIONS_DIR   = TEMP_DATA / "step4_create_monthly_data" / f"positions_by_year_{THRESHOLD}"
 UNIVERSE        = BASE / "cleaned_data" / "keyword_dictionary_approach" / "reveliolab_universe_identifiers.csv"
 ALL_JOBS        = BASE / "cleaned_data" / "keyword_dictionary_approach" / "all_new_jobs_monthly.csv"
-OUT_DIR         = BASE / "cleaned_data" / f"role_based_approach_{THRESHOLD}"
+OUT_DIR         = BASE / "cleaned_data" / "role_based_approach_w_10m_description_fallback"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SASB_COLS = [
@@ -74,20 +74,20 @@ print(f"Total positions: {len(positions):,}")
 print("Joining SASB categories ...")
 positions = positions.merge(mapping, on="role_k10000_v3", how="inner")
 
-# ── 4. Parse startdate → start_month ─────────────────────────────────────────
+# ── 4. Parse startdate -> start_month ─────────────────────────────────────────
 print("Parsing dates ...")
 positions["startdate"] = pd.to_datetime(positions["startdate"], errors="coerce")
 positions = positions.dropna(subset=["startdate"])
 positions["start_month"] = positions["startdate"].dt.to_period("M").astype(str)
 
-# ── 5. Explode sasb_categories → one row per position × category ──────────────
+# ── 5. Explode sasb_categories -> one row per position × category ──────────────
 print("Exploding SASB categories ...")
 positions["sasb_categories"] = positions["sasb_categories"].apply(parse_list)
 positions = positions.explode("sasb_categories").rename(columns={"sasb_categories": "category"})
 positions = positions.dropna(subset=["category"])
 print(f"  {len(positions):,} position-category rows")
 
-# ── 6. Aggregate: rcid × start_month × category → weighted count ─────────────
+# ── 6. Aggregate: rcid × start_month × category -> weighted count ─────────────
 print("Aggregating to rcid-month-category ...")
 long = (
     positions
@@ -130,7 +130,8 @@ rcids = pd.DataFrame({"rcid": all_jobs["rcid"].unique()})
 panel = rcids.merge(all_months, how="cross")
 
 wide_balanced = panel.merge(wide, on=["rcid", "start_month"], how="left")
-wide_balanced[SASB_COLS] = wide_balanced[SASB_COLS].fillna(0)
+for col in SASB_COLS:
+    wide_balanced[col] = wide_balanced[col].fillna(0).astype("float32")
 print(f"  Balanced panel: {len(wide_balanced):,} rows, {wide_balanced['rcid'].nunique():,} RCIDs")
 
 # ── 9. Merge company identifiers ──────────────────────────────────────────────
@@ -140,9 +141,9 @@ wide_balanced["gvkey"].isna().sum()
 len(wide_balanced)
 
 # ── 10. Save monthly counts ───────────────────────────────────────────────────
-out_counts = OUT_DIR / "revelio_sasb_monthly_new_jobs_role_based.parquet"
+out_counts = OUT_DIR / f"revelio_sasb_monthly_new_jobs_role_based_{THRESHOLD}.parquet"
 wide_balanced.to_parquet(out_counts, index=False)
-print(f"Saved counts → {out_counts}")
+print(f"Saved counts -> {out_counts}")
 
 # ── 11. Compute shares ────────────────────────────────────────────────────────
 print("Computing SASB shares ...")
@@ -160,12 +161,12 @@ for col in SASB_COLS:
 pct_cols = [f"pct_{c}" for c in SASB_COLS]
 df_share[pct_cols] = df_share[pct_cols].fillna(0)
 
-out_share = OUT_DIR / "revelio_sasb_monthly_share_new_jobs_role_based.parquet"
+out_share = OUT_DIR / f"revelio_sasb_monthly_share_new_jobs_role_based_{THRESHOLD}.parquet"
 df_share.to_parquet(out_share, index=False)
-print(f"Saved shares  → {out_share}")
+print(f"Saved shares  -> {out_share}")
 
 # ── 12. Quick summary ─────────────────────────────────────────────────────────
-print("\n── Summary ──────────────────────────────────────────────────────────────")
+print("\n-- Summary --")
 print(f"  RCIDs with any SASB job : {wide_balanced['rcid'].nunique():,}")
 print(f"  Total rcid-months       : {len(wide_balanced):,}")
 any_sasb = (wide_balanced[SASB_COLS].sum(axis=1) > 0).sum()

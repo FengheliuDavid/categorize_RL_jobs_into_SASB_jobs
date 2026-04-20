@@ -20,7 +20,7 @@ from pathlib import Path
 BASE      = Path("D:/fenghe/dropbox/Dropbox/fengheliu/temp/sasb_jobs")
 TEMP_DATA = BASE / "temp_data"
 
-THRESHOLD    = "10m_0.3"
+THRESHOLD    = "10m_0.5"
 ROLE_MAPPING = TEMP_DATA / "step3_assign_unmatched_roles" / f"role_to_sasb_mapping_{THRESHOLD}.csv"
 OUT_DIR      = TEMP_DATA / "step4_create_monthly_data" / f"positions_by_year_{THRESHOLD}"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -89,6 +89,6 @@ for year in YEARS:
     """
     df = client.query_df(query)
     df.to_parquet(out_path, index=False)
-    print(f"    → {len(df):,} rows saved to {out_path.name}")
+    print(f"    -> {len(df):,} rows saved to {out_path.name}")
 
 print("\nDone.")
