@@ -1,0 +1,2 @@
+These scripts are deprecated because they measure gross inflow only (new hires by `startdate`), producing raw SASB job counts and shares that do not account for separations.
+The pipeline has been updated to compute net inflow (inflow minus outflow), with both the SASB numerator and the total-jobs denominator adjusted accordingly.

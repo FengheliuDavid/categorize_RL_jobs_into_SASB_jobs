@@ -20,10 +20,12 @@ from pathlib import Path
 BASE      = Path("D:/fenghe/dropbox/Dropbox/fengheliu/temp/sasb_jobs")
 TEMP_DATA = BASE / "temp_data"
 
-THRESHOLD    = "10m_0.5"
+THRESHOLD    = "10m_0.3"
 ROLE_MAPPING = TEMP_DATA / "step3_assign_unmatched_roles" / f"role_to_sasb_mapping_{THRESHOLD}.csv"
-OUT_DIR      = TEMP_DATA / "step4_create_monthly_data" / f"positions_by_year_{THRESHOLD}"
+OUT_DIR          = TEMP_DATA / "step4_create_monthly_data" / f"positions_by_year_{THRESHOLD}"
+OUT_DIR_OUTFLOW  = TEMP_DATA / "step4_create_monthly_data" / f"outflow_positions_by_year_{THRESHOLD}"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR_OUTFLOW.mkdir(parents=True, exist_ok=True)
 
 YEARS = list(range(2007, 2026))
 
@@ -81,6 +83,7 @@ for year in YEARS:
         p.position_id,
         p.rcid,
         p.startdate,
+        p.enddate,
         p.role_k10000_v3,
         p.weight
     FROM revelio071625.temp_processed_global_position p
@@ -90,5 +93,49 @@ for year in YEARS:
     df = client.query_df(query)
     df.to_parquet(out_path, index=False)
     print(f"    -> {len(df):,} rows saved to {out_path.name}")
+
+# ── 4. Pull outflow positions year by year (partitioned by enddate) ───────────
+# Separate from the inflow pull so that positions starting before 2007 but
+# ending within the sample window are captured in outflow.
+for year in YEARS:
+    out_path = OUT_DIR_OUTFLOW / f"outflow_positions_{year}.parquet"
+    if out_path.exists():
+        print(f"  {year} outflow: already exists, skipping")
+        continue
+
+    print(f"  Pulling {year} outflow ...")
+    query = f"""
+    SELECT
+        p.position_id,
+        p.rcid,
+        p.enddate,
+        p.role_k10000_v3,
+        p.weight
+    FROM revelio071625.temp_processed_global_position p
+    INNER JOIN revelio071625.tmp_mapped_roles m ON p.role_k10000_v3 = m.role
+    WHERE toYear(parseDateTimeBestEffortOrNull(p.enddate)) = {year}
+      AND p.enddate != ''
+    """
+    df = client.query_df(query)
+    df.to_parquet(out_path, index=False)
+    print(f"    -> {len(df):,} rows saved to {out_path.name}")
+
+# ── 5. Pull total outflows (all positions) by enddate ─────────────────────────
+print("Pulling total outflow (all positions) by end_month ...")
+outflow_query = """
+SELECT
+    rcid,
+    formatDateTime(parseDateTimeBestEffortOrNull(enddate), '%Y-%m') AS end_month,
+    sum(weight) AS all_outflow_jobs_weighted
+FROM revelio071625.temp_processed_global_position
+WHERE parseDateTimeBestEffortOrNull(enddate) IS NOT NULL
+  AND enddate != ''
+GROUP BY rcid, end_month
+"""
+all_outflow = client.query_df(outflow_query)
+all_outflow = all_outflow.sort_values(by=["rcid", "end_month"])
+out_outflow = BASE / "cleaned_data" / "keyword_dictionary_approach" / "all_outflow_jobs_monthly.csv"
+all_outflow.to_csv(out_outflow, index=False)
+print(f"Saved total outflow -> {out_outflow}")
 
 print("\nDone.")
