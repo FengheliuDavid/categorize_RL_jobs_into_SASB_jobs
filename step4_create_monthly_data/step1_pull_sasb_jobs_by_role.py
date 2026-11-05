@@ -138,4 +138,34 @@ out_outflow = BASE / "cleaned_data" / "keyword_dictionary_approach" / "all_outfl
 all_outflow.to_csv(out_outflow, index=False)
 print(f"Saved total outflow -> {out_outflow}")
 
+# ── 6. Pull total employee stock per rcid × month (used as denominator) ─────────────────────────────
+print("Pulling total employee stock by month ...")
+stock_frames = []
+for year in range(2006, 2026):
+    for month_num in range(1, 13):
+        month_name = f"{year}-{month_num:02d}"
+        month_date = f"{year}-{month_num:02d}-01"
+        query = f"""
+        SELECT
+            rcid,
+            '{month_name}' AS stock_month,
+            COALESCE(SUM(weight), 0) AS stock_weighted
+        FROM revelio071625.temp_processed_global_position
+        WHERE (parseDateTimeBestEffortOrNull(startdate) <= toDate('{month_date}')
+               OR parseDateTimeBestEffortOrNull(startdate) IS NULL)
+          AND (parseDateTimeBestEffortOrNull(enddate) >= toDate('{month_date}')
+               OR parseDateTimeBestEffortOrNull(enddate) IS NULL
+               OR enddate = '')
+        GROUP BY rcid
+        """
+        df_month = client.query_df(query)
+        stock_frames.append(df_month)
+    print(f"  {year} done")
+
+all_stock = pd.concat(stock_frames, ignore_index=True)
+all_stock = all_stock.sort_values(by=["rcid", "stock_month"])
+out_stock = BASE / "cleaned_data" / "keyword_dictionary_approach" / "all_stock_jobs_monthly.csv"
+all_stock.to_csv(out_stock, index=False)
+print(f"Saved total stock -> {out_stock}")
+
 print("\nDone.")
